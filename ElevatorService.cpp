@@ -12,12 +12,14 @@ enum class Dir{
 };
 
 class ElevatorRequest{
+
     public:
+    int servingElevator;
     Dir dir;
     char name;
     int src_floor, dest_floor, o_dist;
     ElevatorRequest(Dir pdir, int psrc_floor, int pdest_floor, char nm): dir(pdir), 
-    src_floor(psrc_floor), dest_floor(pdest_floor), o_dist(-1),name(nm)
+    src_floor(psrc_floor), dest_floor(pdest_floor), o_dist(-1),name(nm), servingElevator(-1)
     {}
     string printRequest(){
         return "from "+ to_string(src_floor) +" to "+to_string(dest_floor)+"\n";
@@ -30,18 +32,20 @@ class Elevator{
     int elevator_num, min_floor, max_floor;
     vector<ElevatorRequest*> pickupRequests;
     vector<ElevatorRequest*> dropRequests;
+    set<int> disabled_floors;
     // curr_dir = 1 going up
     // curr_dir = 2 down
     // curr_dir = 0 stay
 
     void serve(){
+
         vector<ElevatorRequest*> new_pickupRequests;
         vector<ElevatorRequest*> new_dropRequests;
 
         for(auto dropRequest:dropRequests){
             if(dropRequest->dest_floor == curr_floor){
                 mtx.lock();
-                cout<<"elevator-"<<elevator_num<<" droped "<<dropRequest->name<<" on floor "<< curr_floor<<" from "<<dropRequest->src_floor<<"\n";
+                cout<<"elevator-"<<elevator_num<<" drops "<<dropRequest->name<<" on floor "<< curr_floor<<" from "<<dropRequest->src_floor<<"\n";
                 mtx.unlock();
             }
             else{
@@ -51,7 +55,7 @@ class Elevator{
         for(auto pickupRequest:pickupRequests){
             if(pickupRequest->src_floor == curr_floor && pickupRequest->dir == curr_dir){
                 mtx.lock();
-                cout<<"elevator-"<<elevator_num<<" pickup "<<pickupRequest->name<<" on floor "<< curr_floor<<" towards "<<pickupRequest->dest_floor<<"\n";
+                cout<<"elevator-"<<elevator_num<<" picks up "<<pickupRequest->name<<" on floor "<< curr_floor<<" towards "<<pickupRequest->dest_floor<<"\n";
                 mtx.unlock();
                 new_dropRequests.push_back(pickupRequest);
             }
@@ -106,10 +110,7 @@ class Elevator{
         mtx.lock();
         pickupRequests.push_back(ereq);
         mtx.unlock();
-
-        mtx.lock();
-        cout<<"elevator-"<<elevator_num<<" will be picking "<<ereq->name<<"\n";
-        mtx.unlock();
+        ereq->servingElevator = elevator_num;
     }
     void moveNext(){
         int just_up=INT_MAX,just_down=INT_MAX;
@@ -132,7 +133,6 @@ class Elevator{
             }
         }
         else{
-        
             for(ElevatorRequest* pickupRequest:pickupRequests){
                 // 
                 if(pickupRequest->src_floor > curr_floor){
@@ -145,9 +145,13 @@ class Elevator{
                         just_down = (curr_floor - pickupRequest->src_floor);
                     }
                 }
+                else{
+                    curr_dir = pickupRequest->dir;
+                    serve();
+                    break;
+                }
             }
         }
-
         if(curr_dir==Dir::STAY){
             if(just_up<just_down){
                 move_up();
@@ -155,7 +159,6 @@ class Elevator{
             else if(just_up> just_down){
                 move_down();
             }
-
         }
         else if(curr_dir==Dir::UP){
             if(just_up<INT_MAX){
@@ -173,6 +176,24 @@ class Elevator{
                 move_up();
             }
         }
+    }
+
+
+    void disableFloor(int floorId){
+        disabled_floors.insert(floorId);
+    }
+
+    void enableFloor(int floorId){
+        if(disabled_floors.find(floorId)!=disabled_floors.end()){
+            disabled_floors.erase(floorId);
+        }
+    }
+
+    bool checkIfFloorsDisabled(int src_floor, int dst_floor){
+        if(disabled_floors.find(src_floor)==disabled_floors.end() && disabled_floors.find(dst_floor)==disabled_floors.end()){
+            return true;
+        }
+        return false;
     }
 
 };
@@ -199,12 +220,6 @@ class FloorDB{
     public:
     map<int, Floor*> floors_map;
 };
-
-// class Factory{
-//     // create Floor
-//     // create Elevator
-// };
-
 
 
 class ElevatorService{
@@ -252,12 +267,9 @@ class ElevatorService{
     // Add, remove floors
     // Add, remove elevators
 
-    void scheduleTrip(int srcFloor, int destFloor,char name){
+    string scheduleTrip(int srcFloor, int destFloor,char name){
         if(srcFloor==destFloor){
-            mtx.lock();
-            cout<< "Cannot accept same floor movement\n";
-            mtx.unlock();
-            return;
+            return "Cannot accept same floor movement";
         }
         ElevatorRequest* ereq;
         if(srcFloor< destFloor){
@@ -270,13 +282,19 @@ class ElevatorService{
         }
         mtx.lock();
         eRequests.push(ereq);
-
         mtx.unlock();
+        while(ereq->servingElevator ==-1){
+
+        }
+        if(ereq->servingElevator==-2){
+            return "No elevator is ready to pick";
+        }
+        return "elevator-"+to_string(ereq->servingElevator)+" will be picking "+ereq->name;
     }
 
     void assignElevator(ElevatorRequest* req){
 
-        Elevator* elevator, *pickEl;
+        Elevator* elevator, *pickEl=NULL;
         int o_dist,fin_odist=INT_MAX;
         for(auto elevator_pair:elevatorDB->elevators_map){
             elevator = elevator_pair.second;
@@ -298,13 +316,19 @@ class ElevatorService{
                     o_dist = 2*maxfloor-(elevator->curr_floor)-(req->src_floor);
                 }
             }
-            if (o_dist<fin_odist){
+            if (o_dist<fin_odist && elevator->checkIfFloorsDisabled(req->src_floor, req->dest_floor)){
                 pickEl = elevator;
                 fin_odist = o_dist;
             }
+
+        }
+        if(pickEl==NULL){
+            req->servingElevator = -2;
+            return;
         }
         req->o_dist = fin_odist;
         pickEl->addPickup(req);
+        
     }
 
     static void serviceRequests(){
@@ -342,11 +366,31 @@ class ElevatorService{
         }
     }
 
+    void removeAElevator(int elevatorId){
+
+        Elevator* elevator=elevatorDB->elevators_map[elevatorId];
+        elevatorDB->elevators_map.erase(elevatorId);
+        delete elevator;
+    }
+
+    void addAElevator(int elevatorId){
+
+        elevatorDB->elevators_map[elevatorId] = new Elevator(elevatorId,1);
+        elevatorDB->elevators_map[elevatorId]->setFloors(minfloor,maxfloor);
+    }
+
+    void disableAFloor(int elevatorId, int floorId){
+        elevatorDB->elevators_map[elevatorId]->disableFloor(floorId);
+    }
+
+    void enableAFloor(int elevatorId, int floorId){
+        elevatorDB->elevators_map[elevatorId]->enableFloor(floorId);
+    }
+
     static void startRunningElevators(){
         ElevatorService* eService = ElevatorService::findInstance();
         eService->runningElevators();
     }
-
 };
 
 ElevatorService* ElevatorService::eServiceIns = NULL;
@@ -367,7 +411,10 @@ class Client{
         mtx.lock();
         cout<<"scheduling "<<src_floor<<" -> "<<dest_floor<<" for "<<name<<"\n";
         mtx.unlock();
-        elevatorService->scheduleTrip(src_floor, dest_floor,name);
+        string schedule_msg = elevatorService->scheduleTrip(src_floor, dest_floor,name);
+        mtx.lock();
+        cout<<schedule_msg<<" \n";
+        mtx.unlock();
     }
 
 };
@@ -378,22 +425,24 @@ class SystemAdmin{
     {
         ElevatorService::getInstance(floors, elevators);
     }
-    /*
-    // Future Enhancement
-
+    
     void removeElevator(int elevatorId){
-
+        ElevatorService *eService = ElevatorService::findInstance();
+        eService->removeAElevator(elevatorId);
     }
     void addElevator(int elevatorId){
-
+        ElevatorService *eService = ElevatorService::findInstance();
+        eService->addAElevator(elevatorId);
     }
-    void disableFloor(int floorId){
-
+    void disableFloor(int elevatorId, int floorId){
+        ElevatorService *eService = ElevatorService::findInstance();
+        eService->disableAFloor(elevatorId, floorId);
     }
-    void enableFloor(int floorId){
 
+    void enableFloor(int elevatorId, int floorId){
+        ElevatorService *eService = ElevatorService::findInstance();
+        eService->enableAFloor(elevatorId, floorId);
     }
-    */
 
 };
 void requests(Client* client){
@@ -415,13 +464,15 @@ int main() {
     vector<Elevator*> elevators;
     vector<Floor*> floors;
 
-    for(int i=1;i<4;i++){
+    for(int i=1;i<3;i++){
         elevators.push_back(new Elevator(i,1));
     }
     for(int i=0;i<5;i++){
         floors.push_back(new Floor(i));
     }
     admin->initialiseElevatorSystem(elevators, floors);
+    admin->addElevator(5);
+    admin->disableFloor(5,2);
 
     Client* client=new Client();
 
